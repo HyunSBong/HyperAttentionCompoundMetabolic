@@ -2,6 +2,7 @@ import random
 import os
 import csv
 import sys
+from datetime import datetime
 
 from dataset import CustomDataSet, collate_fn_new, collate_fn_new_dacon
 
@@ -23,7 +24,9 @@ from sklearn.metrics import mean_squared_log_error, mean_absolute_error, mean_sq
 from sklearn.model_selection import train_test_split, StratifiedKFold, cross_validate
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
-from model import AttentionDTI, RMSELoss, RMSLELoss
+from model_dacon import AttentionDTI, RMSELoss, RMSLELoss
+
+import wandb
 
 def show_result(DATASET,lable,Accuracy_List,Precision_List,Recall_List,AUC_List,AUPR_List):
     Accuracy_mean, Accuracy_var = np.mean(Accuracy_List), np.var(Accuracy_List)
@@ -129,6 +132,7 @@ import os
 import pandas as pd
 os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 if __name__ == "__main__":
+    
     """select seed"""
     SEED = 1234
     random.seed(SEED)
@@ -142,6 +146,11 @@ if __name__ == "__main__":
     """Load preprocessed data."""
     weight_CE = None
     dir_input = './data/compound/'
+    
+    
+    ### wandb
+    now = datetime.now()
+    wandb.init(project="HyperAttentionDTI test", reinit=True)
     
     # mol = pd.read_csv(dir_input + 'train_mol2vec.csv')
     # labels = pd.read_csv(dir_input + 'train.csv')[['MLM','HLM']]
@@ -169,7 +178,7 @@ if __name__ == "__main__":
         target = 2
         
     dataset = CustomDataSet(df)
-    dacon_test = CustomDataSet(dacon_test_df)
+    dacon_test_dataset = CustomDataSet(dacon_test_df)
     train_size = int(len(dataset) * 0.8)
     valid_size = int(len(dataset) * 0.2)
     test_size = int(len(dataset) * 0.05)
@@ -179,19 +188,17 @@ if __name__ == "__main__":
     train_dataset = list(train_dataset)
     valid_dataset = list(valid_dataset)
     test_dataset = list(test_dataset)
-    dacon_test_dataset = list(dacon_test)
     print(train_dataset[:3])
     
     train_column2_values = [float(data.split(',')[target]) for data in train_dataset]
     valid_column2_values = [float(data.split(',')[target]) for data in valid_dataset]
     test_column2_values = [float(data.split(',')[target]) for data in test_dataset]
-    dacon_test_dataset_vec = [float(data.split(',')[target]) for data in dacon_test_dataset]
     
+    # scaler = StandardScaler()
     scaler = MinMaxScaler()
     train_scaled = scaler.fit_transform(np.array(train_column2_values).reshape(-1, 1))
     valid_scaled = scaler.transform(np.array(valid_column2_values).reshape(-1, 1))
     test_scaled = scaler.transform(np.array(test_column2_values).reshape(-1, 1))
-    dacon_test_scaled = scaler.transform(np.array(dacon_test_dataset_vec).reshape(-1, 1))
     
     for i in range(len(train_dataset)):
         parts = train_dataset[i].split(',')
@@ -211,16 +218,9 @@ if __name__ == "__main__":
         parts[target] = str(scaled_value)[1:-2]
         test_dataset[i] = ','.join(parts)
         
-    for i in range(len(dacon_test_dataset)):
-        parts = dacon_test_dataset[i].split(',')
-        scaled_value = dacon_test_scaled[i]
-        parts[target] = str(scaled_value)[1:-2]
-        dacon_test_dataset[i] = ','.join(parts)
-        
     train_dataset = CustomDataSet(train_dataset)
     valid_dataset = CustomDataSet(valid_dataset)
     test_dataset = CustomDataSet(test_dataset)
-    dacon_test_dataset = CustomDataSet(dacon_test_dataset)
     
     
     K_Fold = 1 # 5
@@ -264,6 +264,8 @@ if __name__ == "__main__":
                 bias_p += [p]
             else:
                 weight_p += [p]
+                
+        wandb.watch(model)
         """load trained model"""
         # model.load_state_dict(torch.load("output/model/lr=0.001,dropout=0.1,lr_decay=0.5"))
 
@@ -273,9 +275,9 @@ if __name__ == "__main__":
         
         scheduler = optim.lr_scheduler.CyclicLR(optimizer, base_lr=hp.Learning_rate, max_lr=hp.Learning_rate*10, cycle_momentum=False, step_size_up=len(train_loader) // hp.Batch_size)
 
-        # Loss = nn.MSELoss(size_average=False, reduction="sum")
+        Loss = nn.MSELoss(size_average=False, reduction="sum")
         # Loss = RMSLELoss()
-        Loss = RMSELoss()
+        # Loss = RMSELoss()
         # print(model)
         
         save_path = "./" + 'dacon' + "/{}".format(i_fold)
@@ -293,8 +295,7 @@ if __name__ == "__main__":
 
         
         early_stopping = EarlyStopping(savepath = save_path,patience=hp.Patience, verbose=True, delta=0)
-        # print("Before train,test the model:")
-        # _,_,_,_,_,_ = test_model(test_dataset_load, save_path, DATASET, Loss, dataset="Test",lable="untrain",save=False)
+        
         """Start training."""
         print('Training...')
         start = timeit.default_timer()
@@ -320,6 +321,7 @@ if __name__ == "__main__":
                 
                 train_labels = list(trian_labels.to('cpu').data.numpy())
                 train_preds = pred.to('cpu').data.numpy()
+                
                 flatten_np = lambda pred: [item for sublist in pred for item in sublist]
                 flatten_train_preds = flatten_np(train_preds)
 
@@ -327,17 +329,17 @@ if __name__ == "__main__":
                 # print(flatten_train_preds)
                 # print(xd)
                 
-                train_loss = Loss(pred, trian_labels)
+                train_loss = Loss(pred, trian_labels.view(-1, 1))
                 train_losses_in_epoch.append(train_loss.item())
                 train_loss.backward()
-                # torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=10)
                 optimizer.step()
                 scheduler.step()
                 
             train_loss_a_epoch = np.average(train_losses_in_epoch)
             print(f'Epoch[{epoch}/{hp.Epoch}] train mse loss per epoch =====> {train_loss_a_epoch}')
-            # writer.add_scalar('Train Loss', train_loss_a_epoch, epoch)
-            # avg_train_losses.append(train_loss_a_epoch)
+            wandb.log({
+                "Train RMSE Loss": train_loss_a_epoch,
+            })
 
             """valid"""
             valid_pbar = tqdm(
@@ -356,7 +358,7 @@ if __name__ == "__main__":
                     valid_labels = valid_labels.cuda()
 
                     pred = model(valid_compounds, valid_features)
-                    valid_loss = Loss(pred, valid_labels)
+                    valid_loss = Loss(pred, valid_labels.view(-1, 1))
                     
                     valid_labels = list(valid_labels.to('cpu').data.numpy())
                     valid_preds = list(pred.to('cpu').data.numpy())
@@ -377,7 +379,9 @@ if __name__ == "__main__":
                     
             valid_loss_a_epoch = np.average(valid_losses_in_epoch)  
             print(f'Epoch[{epoch}/{hp.Epoch}] valid mse loss per epoch =====> {valid_loss_a_epoch}')
-            # avg_valid_loss.append(valid_loss)
+            wandb.log({
+                "Valid RMSE Loss": valid_loss_a_epoch,
+            })
 
 
             # early_stopping needs the validation loss to check if it has decresed,
@@ -386,24 +390,24 @@ if __name__ == "__main__":
             
             # print(pred_ls)
             # print(true_ls)
-            mae_score = mean_absolute_error(true_ls, pred_ls)
-            mse_score = mean_squared_error(true_ls, pred_ls)
-            rmse_score = np.sqrt(mse_score)
-            rmsle_score = mean_squared_log_error(true_ls, pred_ls)
-            print('MAE SCORE : ', mae_score)
-            print('MSE SCORE : ', mse_score)
-            print('RMSE SCORE : ', rmse_score)
-            print('RMSLE SCORE : ', rmsle_score)
-            print('R2 SCORE : ', r2_score(true_ls, pred_ls))
+            # mae_score = mean_absolute_error(true_ls, pred_ls)
+            # mse_score = mean_squared_error(true_ls, pred_ls)
+            # rmse_score = np.sqrt(mse_score)
+            # rmsle_score = mean_squared_log_error(true_ls, pred_ls)
+            # print('MAE SCORE : ', mae_score)
+            # print('MSE SCORE : ', mse_score)
+            # print('RMSE SCORE : ', rmse_score)
+            # print('RMSLE SCORE : ', rmsle_score)
+            # print('R2 SCORE : ', r2_score(true_ls, pred_ls))
             
-            output_file = f"./valid_predictions_{hp.target}_RMSE_{rmse_score.round(3)}.csv"
-            with open(output_file, mode='w', newline='') as file:
-                writer = csv.writer(file)
-                writer.writerow([f"True_Label_{hp.target}", f"Predicted_Label_{hp.target}"])
-                for true_label, predicted_label in zip(true_ls, pred_ls):
-                    writer.writerow([true_label, predicted_label])
+#             output_file = f"./valid_predictions_{hp.target}_RMSE_{rmse_score.round(3)}.csv"
+#             with open(output_file, mode='w', newline='') as file:
+#                 writer = csv.writer(file)
+#                 writer.writerow([f"True_Label_{hp.target}", f"Predicted_Label_{hp.target}"])
+#                 for true_label, predicted_label in zip(true_ls, pred_ls):
+#                     writer.writerow([true_label, predicted_label])
 
-            print(f"Valid predictions saved to {output_file}")
+#             print(f"Valid predictions saved to {output_file}")
         
         """test"""
         test_pbar = tqdm(
@@ -496,25 +500,4 @@ if __name__ == "__main__":
                     writer.writerow([predicted_label])
 
             print(f"Test predictions saved to {output_file}")
-
-#         trainset_test_stable_results,_,_,_,_,_ = test_model(train_dataset_load, save_path, DATASET, Loss, dataset="Train", lable="stable")
-#         validset_test_stable_results,_,_,_,_,_ = test_model(valid_dataset_load, save_path, DATASET, Loss, dataset="Valid", lable="stable")
-#         testset_test_stable_results,Accuracy_test, Precision_test, Recall_test, AUC_test, PRC_test = \
-#             test_model(test_dataset_load, save_path, DATASET, Loss, dataset="Test", lable="stable")
-#         AUC_List_stable.append(AUC_test)
-#         Accuracy_List_stable.append(Accuracy_test)
-#         AUPR_List_stable.append(PRC_test)
-#         Recall_List_stable.append(Recall_test)
-#         Precision_List_stable.append(Precision_test)
-#         with open(save_path + "The_results_of_whole_dataset.txt", 'a') as f:
-#             f.write("Test the stable model" + '\n')
-#             f.write(trainset_test_stable_results + '\n')
-#             f.write(validset_test_stable_results + '\n')
-#             f.write(testset_test_stable_results + '\n')
-
-#     show_result(DATASET, "stable",
-#                 Accuracy_List_stable, Precision_List_stable, Recall_List_stable,
-#                 AUC_List_stable, AUPR_List_stable)
-
-
 
